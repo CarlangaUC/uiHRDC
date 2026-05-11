@@ -133,12 +133,22 @@ static int pack_occ_lists_for_zdd(uint nwords, uint *lenList, uint **occList, co
 	ulong w;
 	ulong doc;
 	int warned_out_of_range = 0;
+	ulong out_of_range_count = 0;
+	ulong trunc_master_count = 0;
+	ulong trunc_rel_count = 0;
+	uint32_t max_master_seen = 0;
+	uint32_t max_rel_seen = 0;
+	uint32_t max_master_packed = 0;
+	uint32_t max_rel_packed = 0;
+	uint32_t max_packed_value = 0;
 
 	for (w = 0; w < nwords; ++w) {
 		for (doc = 0; doc < lenList[w]; ++doc) {
 			uint32_t global_id = (uint32_t) occList[w][doc];
 			uint32_t master;
 			uint32_t rel;
+			uint32_t master_packed;
+			uint32_t rel_packed;
 			uint32_t packed;
 
 			if (!find_master_doc_id(global_id, page_map, map_len, &master)) {
@@ -148,16 +158,40 @@ static int pack_occ_lists_for_zdd(uint nwords, uint *lenList, uint **occList, co
 					        "Esas entradas seran mapeadas como (0,0).\n");
 					warned_out_of_range = 1;
 				}
+				out_of_range_count++;
 				master = 0;
 				rel = 0;
 			} else {
 				rel = global_id - page_map[master];
 			}
 
-			packed = ((master & 0xFFFFu) << 16) | (rel & 0xFFFFu);
+			if (master > max_master_seen) max_master_seen = master;
+			if (rel > max_rel_seen) max_rel_seen = rel;
+
+			master_packed = master & 0xFFFFu;
+			rel_packed = rel & 0xFFFFu;
+			if (master != master_packed) trunc_master_count++;
+			if (rel != rel_packed) trunc_rel_count++;
+
+			if (master_packed > max_master_packed) max_master_packed = master_packed;
+			if (rel_packed > max_rel_packed) max_rel_packed = rel_packed;
+
+			packed = (master_packed << 16) | rel_packed;
+			if (packed > max_packed_value) max_packed_value = packed;
 			occList[w][doc] = (uint) packed;
 		}
 	}
+
+	fprintf(stderr,
+	        "\n[ZDD] Packing 16/16 stats: maxMaster(real)=%u, maxRel(real)=%u, "
+	        "maxMaster(packed)=%u, maxRel(packed)=%u, maxPackedValue=%u (0x%08X)",
+	        (uint) max_master_seen, (uint) max_rel_seen,
+	        (uint) max_master_packed, (uint) max_rel_packed,
+	        (uint) max_packed_value, (uint) max_packed_value);
+	fprintf(stderr,
+	        "\n[ZDD] Packing 16/16 warnings: truncMaster=%lu, truncRel=%lu, outOfRange=%lu\n",
+	        trunc_master_count, trunc_rel_count, out_of_range_count);
+
 	return 1;
 }
 
