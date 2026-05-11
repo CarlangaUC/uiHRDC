@@ -1,4 +1,194 @@
 #include "ii.h"
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+static int load_page_mapping(uint32_t **page_map, size_t *map_len) {
+	const char *mapping_path = getenv("PAGE_MAPPING_BIN");
+	FILE *fp;
+	long file_size;
+	size_t entries;
+	size_t i;
+	uint8_t bytes[4];
+
+	if (mapping_path == NULL || mapping_path[0] == '\0') {
+		mapping_path = "page_mapping.bin";
+	}
+
+	fp = fopen(mapping_path, "rb");
+	if (fp == NULL) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not open mapping file '%s': %s. "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path, strerror(errno));
+		return 0;
+	}
+
+	if (fseek(fp, 0L, SEEK_END) != 0) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not seek mapping file '%s': %s. "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path, strerror(errno));
+		fclose(fp);
+		return 0;
+	}
+
+	file_size = ftell(fp);
+	if (file_size < 0) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not get mapping file size '%s': %s. "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path, strerror(errno));
+		fclose(fp);
+		return 0;
+	}
+
+	if (file_size % 4L != 0L) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: mapping file '%s' has invalid size (%ld bytes). "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path, file_size);
+		fclose(fp);
+		return 0;
+	}
+
+	entries = (size_t) (file_size / 4L);
+	if (entries == 0) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: mapping file '%s' is empty. "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path);
+		fclose(fp);
+		return 0;
+	}
+
+	if (fseek(fp, 0L, SEEK_SET) != 0) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not rewind mapping file '%s': %s. "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path, strerror(errno));
+		fclose(fp);
+		return 0;
+	}
+
+	*page_map = (uint32_t *) malloc(entries * sizeof(uint32_t));
+	if (*page_map == NULL) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not allocate %zu bytes for mapping. "
+		        "Continuing without versioned packing/export.\n",
+		        entries * sizeof(uint32_t));
+		fclose(fp);
+		return 0;
+	}
+
+	for (i = 0; i < entries; ++i) {
+		if (fread(bytes, 1, 4, fp) != 4) {
+			fprintf(stderr,
+			        "\n[ZDD] Warning: could not read mapping file '%s': %s. "
+			        "Continuing without versioned packing/export.\n",
+			        mapping_path, strerror(errno));
+			free(*page_map);
+			*page_map = NULL;
+			fclose(fp);
+			return 0;
+		}
+		(*page_map)[i] = ((uint32_t) bytes[0]) |
+		                 ((uint32_t) bytes[1] << 8) |
+		                 ((uint32_t) bytes[2] << 16) |
+		                 ((uint32_t) bytes[3] << 24);
+	}
+
+	fclose(fp);
+	*map_len = entries;
+	return 1;
+}
+
+static int find_master_doc_id(uint32_t global_id, const uint32_t *page_map, size_t map_len, uint32_t *master_out) {
+	size_t lo = 0;
+	size_t hi;
+	size_t mid;
+
+	if (page_map == NULL || map_len == 0 || global_id < page_map[0]) {
+		return 0;
+	}
+
+	hi = map_len - 1;
+	while (lo < hi) {
+		mid = lo + (hi - lo + 1) / 2;
+		if (page_map[mid] <= global_id) {
+			lo = mid;
+		} else {
+			hi = mid - 1;
+		}
+	}
+
+	*master_out = (uint32_t) lo;
+	return 1;
+}
+
+static int pack_occ_lists_for_zdd(uint nwords, uint *lenList, uint **occList, const uint32_t *page_map, size_t map_len) {
+	ulong w;
+	ulong doc;
+	int warned_out_of_range = 0;
+
+	for (w = 0; w < nwords; ++w) {
+		for (doc = 0; doc < lenList[w]; ++doc) {
+			uint32_t global_id = (uint32_t) occList[w][doc];
+			uint32_t master;
+			uint32_t rel;
+			uint32_t packed;
+
+			if (!find_master_doc_id(global_id, page_map, map_len, &master)) {
+				if (!warned_out_of_range) {
+					fprintf(stderr,
+					        "\n[ZDD] Warning: GlobalID fuera del rango de mapeo. "
+					        "Esas entradas seran mapeadas como (0,0).\n");
+					warned_out_of_range = 1;
+				}
+				master = 0;
+				rel = 0;
+			} else {
+				rel = global_id - page_map[master];
+			}
+
+			packed = ((master & 0xFFFFu) << 16) | (rel & 0xFFFFu);
+			occList[w][doc] = (uint) packed;
+		}
+	}
+	return 1;
+}
+
+static int export_occ_lists_unpacked_txt(uint nwords, uint *lenList, uint **occList, const char *output_path) {
+	FILE *fzdd;
+	ulong w;
+	ulong doc;
+
+	fzdd = fopen(output_path, "w");
+	if (fzdd == NULL) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not create '%s': %s. "
+		        "Continuing without txt export.\n",
+		        output_path, strerror(errno));
+		return 0;
+	}
+
+	for (w = 0; w < nwords; ++w) {
+		fprintf(fzdd, "T[%lu]:", w);
+		for (doc = 0; doc < lenList[w]; ++doc) {
+			uint32_t packed = (uint32_t) occList[w][doc];
+			uint32_t master = (packed >> 16) & 0xFFFFu;
+			uint32_t rel = packed & 0xFFFFu;
+			fprintf(fzdd, " (%u,%u)", (uint) master, (uint) rel);
+		}
+		fprintf(fzdd, "\n");
+	}
+
+	fclose(fzdd);
+	return 1;
+}
 
 /** ------------------------------------------------------------------
   * loads the source plain text into memory
@@ -722,7 +912,17 @@ uint progress_cut = ndocs/20;
 int prepareSourceFormatForIListBuilder (uint nwords, uint maxPost, uint *lenList, 
 										uint **occList, uint **formatedList, ulong *formatedLen){
 	ulong i,j;
+	uint32_t *page_map = NULL;
+	size_t map_len = 0;
 	ulong sourcelen=1+1;  //nwords and maxPost
+
+	/* Intercept occList before build_il format generation. */
+	if (load_page_mapping(&page_map, &map_len)) {
+		pack_occ_lists_for_zdd(nwords, lenList, occList, page_map, map_len);
+		export_occ_lists_unpacked_txt(nwords, lenList, occList, "listas_wikipedia_zdd_versionadas.txt");
+		free(page_map);
+	}
+
 	for (i=0;i<nwords;i++) 	sourcelen += 1 + lenList[i];
 	
 	uint *source = (uint *) malloc (sourcelen * sizeof(uint));
@@ -796,7 +996,7 @@ int load_posting_lists_from_file(uint *maxPost, ulong *n_il, uint **source_il, c
 	sprintf(filename, "%s.%s",basename, PREPROCESED_POSTINGS);
 	fprintf(stderr,"\n\tLoading vocabulary of words from index %s", filename);
 
-	if( (file = fopen(filename, "r")) < 0) {
+	if( (file = fopen(filename, "r")) == NULL) {
 		printf("Cannot open file %s\n", filename);
 		exit(0);
 	}		
