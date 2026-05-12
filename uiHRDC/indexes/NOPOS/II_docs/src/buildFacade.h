@@ -77,6 +77,8 @@
 
 
 		uint ndocs;
+		uint versioning_enabled;     /* 0=classic doc ids, 1=packed (master,rel) */
+		uint versioning_map_entries; /* entries loaded from page mapping */
 
 		byte *text;  		 //the original text (if not set to NULL!!) 
 		ulong sourceTextSize; //the size of the source text.
@@ -220,6 +222,11 @@ int build_WordIndex_from_postings (char *inbasename, char *build_options, void *
 
 	/** Returns the list of documents containing the nids terms represented by ids[] **/
 	int index_listDocuments(void *index, uint *ids, uint nids, uint **docs, uint *ndocs);
+	int index_is_versioned(void *index, uint *is_versioned, uint *map_entries);
+	int index_listDocuments_versioned(void *index, uint *ids, uint nids,
+	                                  uint **docs, uint *ndocs, uint *is_versioned);
+	int index_listDocuments_by_version(void *index, uint *ids, uint nids, uint version_id,
+	                                   uint **docs, uint *ndocs, uint *is_versioned);
 	
 /*************************************************************************************************/	
 /*  Public only to give more flexibility to the caller                                           */

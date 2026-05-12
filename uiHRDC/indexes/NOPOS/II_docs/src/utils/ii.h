@@ -53,7 +53,10 @@
 		//		//  ... 
 		//		// [lenPostN][postN1][postN2]...[postNk]
 int prepareSourceFormatForIListBuilder (uint nwords, uint maxPost, uint *lenList, 
-										uint **occList, uint **formatedList, ulong *formatedLen);
+										uint **occList, const char *source_basename,
+										uint **formatedList, ulong *formatedLen);
+int ii_get_last_prepare_versioning_enabled(void);
+uint ii_get_last_prepare_map_entries(void);
 
 int load_posting_lists_from_file(uint *maxPost, ulong *n_il, uint **source_il, char *basename); // if they were created previously
 
