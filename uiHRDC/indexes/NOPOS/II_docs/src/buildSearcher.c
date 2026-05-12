@@ -1,6 +1,5 @@
 //#include <iostream>
 //#include <time.h>   //for timespec and clock_gettime
-using namespace std;
 
 #include "buildFacade.h"
 
@@ -89,6 +88,7 @@ int showResolutionClock() {
 	rc = clock_getres(CLOCK_PROCESS_CPUTIME_ID, &res);
 	if (!rc)
 		printf("CLOCK_PROCESS_CPUTIME_ID: %ldns\n", res.tv_nsec); 	
+	return 0;
 }
 
 #define BILLION  1000000000L;
