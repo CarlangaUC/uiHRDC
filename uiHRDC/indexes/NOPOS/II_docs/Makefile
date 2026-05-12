@@ -7,7 +7,7 @@ CC          = g++
 
 #CFLAGS      = -O0 -g -m64
 
-export CFLAGS  = -O9  -m64  # -D_FORTIFY_SOURCE=0 
+export CFLAGS  = -O9  -m64 -no-pie  # -D_FORTIFY_SOURCE=0 
 #export CFLAGS  = -O3  -m64 -msse4 -mavx -std=c++11  -Weffc++  -ggdb -DDEBUG=1 -D_GLIBCXX_DEBUG
 #export CFLAGS  = -O0 -g  -m64  # -D_FORTIFY_SOURCE=0 
 

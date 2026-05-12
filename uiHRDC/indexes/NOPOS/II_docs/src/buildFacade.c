@@ -89,6 +89,8 @@ int load_index(char *filename, void **index){
 	void *Index = (void *) wcsa;
 	int error;
 	wcsa->text = NULL;
+	wcsa->versioning_enabled = 0;
+	wcsa->versioning_map_entries = 0;
 	
 	// Inicializes the arrays used to detect if a char is valid or not.
 	StartValid();
@@ -104,7 +106,13 @@ int load_index(char *filename, void **index){
 		
 	/** 2 ** Loads some configuration constants: sourceTextSize, maxNumOccs */
 	loadIndexConstants(Index, filename);
-	fprintf(stderr,"\t*Loaded  configuration constants: %lu bytes\n", (ulong) (2 * sizeof(uint ) + sizeof(ulong)) );
+	fprintf(stderr,"\t*Loaded configuration constants (legacy+optional versioning metadata)\n");
+	if (wcsa->versioning_enabled) {
+		fprintf(stderr,"\t*Versioned postings metadata detected: enabled=1, map_entries=%u\n",
+		        wcsa->versioning_map_entries);
+	} else {
+		fprintf(stderr,"\t*Versioned postings metadata detected: enabled=0 (classic mode)\n");
+	}
 
 	#ifdef FREQ_VECTOR_AVAILABLE
 	/** 3 ** Loading freq vector */
@@ -247,6 +255,8 @@ int index_info(void *index, char msg[]) {
 	sprintf (msgt,"\t vocabulary of words = %u bytes.\n", totalVoc );	strcat(msg,msgt);
 	sprintf (msgt,"\t Inverted list-structure = %u bytes.\n",sizeil );	strcat(msg,msgt);
 	sprintf (msgt,"\t Text (compressed representation) = %u bytes.\n", sizerepres);	strcat(msg,msgt);
+	sprintf (msgt,"\t Versioned postings enabled = %u\n", wcsa->versioning_enabled);	strcat(msg,msgt);
+	sprintf (msgt,"\t Version map entries = %u\n", wcsa->versioning_map_entries);	strcat(msg,msgt);
 	sprintf (msgt,"\t Whole index = %lu bytes ", indexs);	strcat(msg,msgt);
 	sprintf (msgt," ** Ratio = %2.3f %% **\n ",  100.0*indexs / Text_length);	strcat(msg,msgt);
 	
@@ -404,6 +414,8 @@ int build_WordIndex (char *inbasename, char *build_options, void **index){
 	wcsa = (twcsa *) malloc (sizeof (twcsa) * 1);
 	*index = wcsa;
 	wcsa->text = NULL;
+	wcsa->versioning_enabled = 0;
+	wcsa->versioning_map_entries = 0;
 	double t0, t1;
 	t0 = getSYSTimeBF();
 
@@ -522,7 +534,16 @@ int build_WordIndex (char *inbasename, char *build_options, void **index){
 		t1 = getSYSTimeBF();
 		fprintf(stderr,"\n... Entering prepareSourceFormatForIListBuilder \n"); fflush(stderr);	
 		
-		prepareSourceFormatForIListBuilder(nwords,maxPost,lenList, occList, &source_il, &source_il_ulong);
+		prepareSourceFormatForIListBuilder(nwords,maxPost,lenList, occList, inbasename,
+		                                   &source_il, &source_il_ulong);
+		wcsa->versioning_enabled = (uint) ii_get_last_prepare_versioning_enabled();
+		wcsa->versioning_map_entries = ii_get_last_prepare_map_entries();
+		if (wcsa->versioning_enabled) {
+			fprintf(stderr,"\n [ZDD] build metadata: versioned postings enabled (map entries=%u)\n",
+			        wcsa->versioning_map_entries);
+		} else {
+			fprintf(stderr,"\n [ZDD] build metadata: no mapping found, keeping classic non-versioned postings\n");
+		}
 
 		/** FOR CIKM ILISTS_DO NOT STILL SUPPORT an ULONG HERE **/
 		sourcelen_il = (uint)source_il_ulong;
@@ -635,6 +656,8 @@ int build_WordIndex_from_postings (char *inbasename, char *build_options, void *
 	*index = wcsa;
 	void *Index = *index;
 	wcsa->text = NULL;
+	wcsa->versioning_enabled = 0;
+	wcsa->versioning_map_entries = 0;
 	double t0, t1;
 	t0 = getSYSTimeBF();
 
@@ -1049,6 +1072,69 @@ int index_listDocuments(void *index, uint *ids, uint nids, uint **docs, uint *nd
 	}  
 	
 	*docs =candDocs;	
+	return 0;
+}
+
+int index_is_versioned(void *index, uint *is_versioned, uint *map_entries) {
+	twcsa* wcsa = (twcsa *) index;
+	if (is_versioned) {
+		*is_versioned = wcsa->versioning_enabled;
+	}
+	if (map_entries) {
+		*map_entries = wcsa->versioning_map_entries;
+	}
+	return 0;
+}
+
+int index_listDocuments_versioned(void *index, uint *ids, uint nids,
+                                  uint **docs, uint *ndocs, uint *is_versioned) {
+	twcsa* wcsa = (twcsa *) index;
+	if (is_versioned) {
+		*is_versioned = wcsa->versioning_enabled;
+	}
+	return index_listDocuments(index, ids, nids, docs, ndocs);
+}
+
+int index_listDocuments_by_version(void *index, uint *ids, uint nids, uint version_id,
+                                   uint **docs, uint *ndocs, uint *is_versioned) {
+	twcsa* wcsa = (twcsa *) index;
+	uint *raw_docs = NULL;
+	uint raw_ndocs = 0;
+	uint *filtered;
+	uint i;
+	uint out_count = 0;
+
+	if (is_versioned) {
+		*is_versioned = wcsa->versioning_enabled;
+	}
+
+	index_listDocuments(index, ids, nids, &raw_docs, &raw_ndocs);
+	if (!wcsa->versioning_enabled) {
+		*docs = raw_docs;
+		*ndocs = raw_ndocs;
+		return 0;
+	}
+
+	filtered = (uint *) malloc(sizeof(uint) * (size_t) raw_ndocs);
+	if (filtered == NULL) {
+		if (raw_docs) free(raw_docs);
+		fprintf(stderr,
+		        "\n could not allocate %lu bytes in index_listDocuments_by_version\n",
+		        (ulong) (sizeof(uint) * (size_t) raw_ndocs));
+		exit(0);
+	}
+
+	for (i = 0; i < raw_ndocs; ++i) {
+		uint packed = raw_docs[i];
+		uint master = (packed >> 16) & 0xFFFFu;
+		if (master == version_id) {
+			filtered[out_count++] = packed;
+		}
+	}
+
+	if (raw_docs) free(raw_docs);
+	*docs = filtered;
+	*ndocs = out_count;
 	return 0;
 }
 

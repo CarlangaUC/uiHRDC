@@ -12,10 +12,6 @@
 	#include <fcntl.h>
 	#include <unistd.h>
 	
-	#ifndef byte
-		#define byte unsigned char
-	#endif 
-		
 	#include "defValues.h"
 	#include "fileInfo.h"
 		

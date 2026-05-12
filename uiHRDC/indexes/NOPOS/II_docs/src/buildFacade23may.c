@@ -515,7 +515,8 @@ int build_WordIndex (char *inbasename, char *build_options, void **index){
 		t1 = getSYSTimeBF();
 		fprintf(stderr,"\n... Entering prepareSourceFormatForIListBuilder \n"); fflush(stderr);	
 		
-		prepareSourceFormatForIListBuilder(nwords,maxPost,lenList, occList, &source_il, &source_il_ulong);
+		prepareSourceFormatForIListBuilder(nwords,maxPost,lenList, occList, inbasename,
+		                                   &source_il, &source_il_ulong);
 
 		/** FOR CIKM ILISTS_DO NOT STILL SUPPORT an ULONG HERE **/
 		sourcelen_il = (uint)source_il_ulong;

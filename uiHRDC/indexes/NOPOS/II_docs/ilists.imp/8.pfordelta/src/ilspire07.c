@@ -363,7 +363,13 @@ int build_il (uint *source, uint length, char *build_options, void **ail) {
 		fprintf(stderr,"\n ! CHECKING that the decoded lists are identical to the original ones (extract_no_malloc). ");
 		{ //checking:: decoding a list
 			uint i, id ,len;
-			uint *list = (uint *) malloc(sizeof(uint) * (il->maxPostingValue+1+ PFD_BS2));
+			size_t scratch_len = (size_t) maxlenlist + (size_t) PFD_BS2;
+			uint *list = (uint *) malloc(sizeof(uint) * scratch_len);
+			if (!list) {
+				fprintf(stderr,"\n could not allocate %lu bytes for extract_no_malloc validation buffer\n",
+				               (ulong) (sizeof(uint) * scratch_len));
+				exit(0);
+			}
 			
 			for (id=0;id < il->nlists;id++) {
 				extractListNoMalloc_il(*ail,id,list,&len);	

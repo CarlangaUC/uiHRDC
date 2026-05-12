@@ -1,4 +1,349 @@
 #include "ii.h"
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+static uint g_last_prepare_versioning_enabled = 0;
+static uint g_last_prepare_map_entries = 0;
+
+static int build_mapping_path_candidates(const char *source_basename,
+                                         char candidates[][4096],
+                                         size_t max_candidates,
+                                         size_t *out_count) {
+	const char *base_start;
+	size_t dir_len = 0;
+	size_t base_len;
+	const char *slash;
+	size_t count = 0;
+	const char *wiki_token;
+	size_t wiki_len;
+
+	if (source_basename == NULL || source_basename[0] == '\0' || max_candidates == 0) {
+		*out_count = 0;
+		return 0;
+	}
+
+	slash = strrchr(source_basename, '/');
+	if (slash != NULL) {
+		dir_len = (size_t) (slash - source_basename + 1);
+		base_start = slash + 1;
+	} else {
+		base_start = source_basename;
+	}
+
+	base_len = strlen(base_start);
+	if (base_len > 4 && strcmp(base_start + base_len - 4, ".txt") == 0) {
+		base_len -= 4;
+	}
+
+	if (count < max_candidates) {
+		snprintf(candidates[count], 4096, "%.*spage_mapping_%.*s.bin",
+		         (int) dir_len, source_basename, (int) base_len, base_start);
+		count++;
+	}
+
+	wiki_token = strstr(base_start, "wiki_");
+	if (wiki_token != NULL) {
+		wiki_len = strlen(wiki_token);
+		if (wiki_len > 4 && strcmp(wiki_token + wiki_len - 4, ".txt") == 0) {
+			wiki_len -= 4;
+		}
+		if (count < max_candidates) {
+			snprintf(candidates[count], 4096, "%.*spage_mapping_%.*s.bin",
+			         (int) dir_len, source_basename, (int) wiki_len, wiki_token);
+			count++;
+		}
+	}
+
+	*out_count = count;
+	return (count > 0);
+}
+
+static int load_page_mapping(const char *source_basename, uint32_t **page_map, size_t *map_len) {
+	const char *env_mapping_path = getenv("PAGE_MAPPING_BIN");
+	char mapping_candidates[3][4096];
+	size_t candidate_count = 0;
+	size_t c;
+	FILE *fp;
+	long file_size;
+	size_t entries;
+	size_t i;
+	uint8_t bytes[4];
+	const char *mapping_path = NULL;
+
+	if (env_mapping_path != NULL && env_mapping_path[0] != '\0') {
+		mapping_path = env_mapping_path;
+		fp = fopen(mapping_path, "rb");
+		if (fp == NULL) {
+			fprintf(stderr,
+			        "\n[ZDD] Warning: could not open mapping file from PAGE_MAPPING_BIN='%s': %s. "
+			        "Continuing without versioned packing/export.\n",
+			        mapping_path, strerror(errno));
+			return 0;
+		}
+	} else {
+		build_mapping_path_candidates(source_basename, mapping_candidates, 3, &candidate_count);
+		fp = NULL;
+		for (c = 0; c < candidate_count; ++c) {
+			fp = fopen(mapping_candidates[c], "rb");
+			if (fp != NULL) {
+				mapping_path = mapping_candidates[c];
+				break;
+			}
+		}
+		if (fp == NULL) {
+			if (candidate_count > 0) {
+				fprintf(stderr,
+				        "\n[ZDD] Warning: no dataset mapping file found. Tried '%s'%s%s%s. "
+				        "Continuing without versioned packing/export.\n",
+				        mapping_candidates[0],
+				        (candidate_count > 1 ? ", '" : ""),
+				        (candidate_count > 1 ? mapping_candidates[1] : ""),
+				        (candidate_count > 1 ? "'" : ""));
+			} else {
+				fprintf(stderr,
+				        "\n[ZDD] Warning: could not derive mapping file from dataset basename. "
+				        "Continuing without versioned packing/export.\n");
+			}
+			return 0;
+		}
+	}
+
+	if (fseek(fp, 0L, SEEK_END) != 0) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not seek mapping file '%s': %s. "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path, strerror(errno));
+		fclose(fp);
+		return 0;
+	}
+
+	file_size = ftell(fp);
+	if (file_size < 0) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not get mapping file size '%s': %s. "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path, strerror(errno));
+		fclose(fp);
+		return 0;
+	}
+
+	if (file_size % 4L != 0L) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: mapping file '%s' has invalid size (%ld bytes). "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path, file_size);
+		fclose(fp);
+		return 0;
+	}
+
+	entries = (size_t) (file_size / 4L);
+	if (entries == 0) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: mapping file '%s' is empty. "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path);
+		fclose(fp);
+		return 0;
+	}
+
+	if (fseek(fp, 0L, SEEK_SET) != 0) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not rewind mapping file '%s': %s. "
+		        "Continuing without versioned packing/export.\n",
+		        mapping_path, strerror(errno));
+		fclose(fp);
+		return 0;
+	}
+
+	*page_map = (uint32_t *) malloc(entries * sizeof(uint32_t));
+	if (*page_map == NULL) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not allocate %zu bytes for mapping. "
+		        "Continuing without versioned packing/export.\n",
+		        entries * sizeof(uint32_t));
+		fclose(fp);
+		return 0;
+	}
+
+	for (i = 0; i < entries; ++i) {
+		if (fread(bytes, 1, 4, fp) != 4) {
+			fprintf(stderr,
+			        "\n[ZDD] Warning: could not read mapping file '%s': %s. "
+			        "Continuing without versioned packing/export.\n",
+			        mapping_path, strerror(errno));
+			free(*page_map);
+			*page_map = NULL;
+			fclose(fp);
+			return 0;
+		}
+		(*page_map)[i] = ((uint32_t) bytes[0]) |
+		                 ((uint32_t) bytes[1] << 8) |
+		                 ((uint32_t) bytes[2] << 16) |
+		                 ((uint32_t) bytes[3] << 24);
+	}
+
+	fclose(fp);
+	*map_len = entries;
+	return 1;
+}
+
+static int build_lists_export_path(const char *source_basename, int is_versioned,
+                                   char *out_path, size_t out_path_len) {
+	const char *base_start;
+	const char *slash;
+	size_t dir_len = 0;
+	size_t base_len;
+
+	if (source_basename == NULL || source_basename[0] == '\0' || out_path == NULL || out_path_len == 0) {
+		return 0;
+	}
+
+	slash = strrchr(source_basename, '/');
+	if (slash != NULL) {
+		dir_len = (size_t) (slash - source_basename + 1);
+		base_start = slash + 1;
+	} else {
+		base_start = source_basename;
+	}
+
+	base_len = strlen(base_start);
+	if (base_len > 4 && strcmp(base_start + base_len - 4, ".txt") == 0) {
+		base_len -= 4;
+	}
+
+	snprintf(out_path, out_path_len, "%.*slistas_wikipedia_zdd_%.*s%s",
+	         (int) dir_len, source_basename,
+	         (int) base_len, base_start,
+	         is_versioned ? "_versionada" : "");
+	return 1;
+}
+
+static int find_master_doc_id(uint32_t global_id, const uint32_t *page_map, size_t map_len, uint32_t *master_out) {
+	size_t lo = 0;
+	size_t hi;
+	size_t mid;
+
+	if (page_map == NULL || map_len == 0 || global_id < page_map[0]) {
+		return 0;
+	}
+
+	hi = map_len - 1;
+	while (lo < hi) {
+		mid = lo + (hi - lo + 1) / 2;
+		if (page_map[mid] <= global_id) {
+			lo = mid;
+		} else {
+			hi = mid - 1;
+		}
+	}
+
+	*master_out = (uint32_t) lo;
+	return 1;
+}
+
+static int pack_occ_lists_for_zdd(uint nwords, uint *lenList, uint **occList, const uint32_t *page_map, size_t map_len) {
+	ulong w;
+	ulong doc;
+	int warned_out_of_range = 0;
+	ulong out_of_range_count = 0;
+	ulong trunc_master_count = 0;
+	ulong trunc_rel_count = 0;
+	uint32_t max_master_seen = 0;
+	uint32_t max_rel_seen = 0;
+	uint32_t max_master_packed = 0;
+	uint32_t max_rel_packed = 0;
+	uint32_t max_packed_value = 0;
+
+	for (w = 0; w < nwords; ++w) {
+		for (doc = 0; doc < lenList[w]; ++doc) {
+			uint32_t global_id = (uint32_t) occList[w][doc];
+			uint32_t master;
+			uint32_t rel;
+			uint32_t master_packed;
+			uint32_t rel_packed;
+			uint32_t packed;
+
+			if (!find_master_doc_id(global_id, page_map, map_len, &master)) {
+				if (!warned_out_of_range) {
+					fprintf(stderr,
+					        "\n[ZDD] Warning: GlobalID fuera del rango de mapeo. "
+					        "Esas entradas seran mapeadas como (0,0).\n");
+					warned_out_of_range = 1;
+				}
+				out_of_range_count++;
+				master = 0;
+				rel = 0;
+			} else {
+				rel = global_id - page_map[master];
+			}
+
+			if (master > max_master_seen) max_master_seen = master;
+			if (rel > max_rel_seen) max_rel_seen = rel;
+
+			master_packed = master & 0xFFFFu;
+			rel_packed = rel & 0xFFFFu;
+			if (master != master_packed) trunc_master_count++;
+			if (rel != rel_packed) trunc_rel_count++;
+
+			if (master_packed > max_master_packed) max_master_packed = master_packed;
+			if (rel_packed > max_rel_packed) max_rel_packed = rel_packed;
+
+			packed = (master_packed << 16) | rel_packed;
+			if (packed > max_packed_value) max_packed_value = packed;
+			occList[w][doc] = (uint) packed;
+		}
+	}
+
+	fprintf(stderr,
+	        "\n[ZDD] Packing 16/16 stats: maxMaster(real)=%u, maxRel(real)=%u, "
+	        "maxMaster(packed)=%u, maxRel(packed)=%u, maxPackedValue=%u (0x%08X)",
+	        (uint) max_master_seen, (uint) max_rel_seen,
+	        (uint) max_master_packed, (uint) max_rel_packed,
+	        (uint) max_packed_value, (uint) max_packed_value);
+	fprintf(stderr,
+	        "\n[ZDD] Packing 16/16 warnings: truncMaster=%lu, truncRel=%lu, outOfRange=%lu\n",
+	        trunc_master_count, trunc_rel_count, out_of_range_count);
+
+	return 1;
+}
+
+static int export_occ_lists_unpacked_txt(uint nwords, uint *lenList, uint **occList,
+                                         const char *output_path, int is_versioned) {
+	FILE *fzdd;
+	ulong w;
+	ulong doc;
+
+	fzdd = fopen(output_path, "w");
+	if (fzdd == NULL) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: could not create '%s': %s. "
+		        "Continuing without txt export.\n",
+		        output_path, strerror(errno));
+		return 0;
+	}
+
+	for (w = 0; w < nwords; ++w) {
+		fprintf(fzdd, "T[%lu]:", w);
+		for (doc = 0; doc < lenList[w]; ++doc) {
+			if (is_versioned) {
+				uint32_t packed = (uint32_t) occList[w][doc];
+				uint32_t master = (packed >> 16) & 0xFFFFu;
+				uint32_t rel = packed & 0xFFFFu;
+				fprintf(fzdd, " (%u,%u)", (uint) master, (uint) rel);
+			} else {
+				fprintf(fzdd, " %u", occList[w][doc]);
+			}
+		}
+		fprintf(fzdd, "\n");
+	}
+
+	fclose(fzdd);
+	return 1;
+}
 
 /** ------------------------------------------------------------------
   * loads the source plain text into memory
@@ -720,9 +1065,32 @@ uint progress_cut = ndocs/20;
 		// [lenPostN][postN1][postN2]...[postNk]
   * ------------------------------------------------------------------*/
 int prepareSourceFormatForIListBuilder (uint nwords, uint maxPost, uint *lenList, 
-										uint **occList, uint **formatedList, ulong *formatedLen){
+										uint **occList, const char *source_basename,
+										uint **formatedList, ulong *formatedLen){
 	ulong i,j;
+	uint32_t *page_map = NULL;
+	size_t map_len = 0;
+	char export_path[4096];
 	ulong sourcelen=1+1;  //nwords and maxPost
+
+	g_last_prepare_versioning_enabled = 0;
+	g_last_prepare_map_entries = 0;
+
+	/* Intercept occList before build_il format generation. */
+	if (load_page_mapping(source_basename, &page_map, &map_len)) {
+		pack_occ_lists_for_zdd(nwords, lenList, occList, page_map, map_len);
+		g_last_prepare_versioning_enabled = 1;
+		g_last_prepare_map_entries = (map_len > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (uint) map_len;
+		free(page_map);
+	}
+	if (!build_lists_export_path(source_basename, g_last_prepare_versioning_enabled,
+	                             export_path, sizeof(export_path))) {
+		strcpy(export_path, g_last_prepare_versioning_enabled ?
+		       "listas_wikipedia_zdd_versionada" : "listas_wikipedia_zdd");
+	}
+	export_occ_lists_unpacked_txt(nwords, lenList, occList, export_path,
+	                              g_last_prepare_versioning_enabled);
+
 	for (i=0;i<nwords;i++) 	sourcelen += 1 + lenList[i];
 	
 	uint *source = (uint *) malloc (sourcelen * sizeof(uint));
@@ -741,6 +1109,14 @@ int prepareSourceFormatForIListBuilder (uint nwords, uint maxPost, uint *lenList
 	*formatedLen  = sourcelen;
 	*formatedList = source;
 	return 0;
+}
+
+int ii_get_last_prepare_versioning_enabled(void) {
+	return (int) g_last_prepare_versioning_enabled;
+}
+
+uint ii_get_last_prepare_map_entries(void) {
+	return g_last_prepare_map_entries;
 }
 
 
@@ -796,7 +1172,7 @@ int load_posting_lists_from_file(uint *maxPost, ulong *n_il, uint **source_il, c
 	sprintf(filename, "%s.%s",basename, PREPROCESED_POSTINGS);
 	fprintf(stderr,"\n\tLoading vocabulary of words from index %s", filename);
 
-	if( (file = fopen(filename, "r")) < 0) {
+	if( (file = fopen(filename, "r")) == NULL) {
 		printf("Cannot open file %s\n", filename);
 		exit(0);
 	}		
@@ -848,6 +1224,8 @@ int saveIndexConstants(void *index, char *basename) {
 	errw = write(file, &wcsa->sourceTextSize, sizeof(ulong));
 	errw = write(file, &wcsa->maxNumOccs, sizeof(uint));
 	errw = write(file, &wcsa->ndocs, sizeof(uint));
+	errw = write(file, &wcsa->versioning_enabled, sizeof(uint));
+	errw = write(file, &wcsa->versioning_map_entries, sizeof(uint));
 	
 	
 	close(file);				
@@ -864,6 +1242,9 @@ int loadIndexConstants(void *index, char *basename) {
 	fprintf(stderr,"\t Loading the configuration constants from file %s\n", filename);
 		
 	twcsa *wcsa=(twcsa *) index;
+	size_t constants_file_size = fileSize(filename);
+	size_t legacy_constants_size = sizeof(ulong) + sizeof(uint) + sizeof(uint);
+	size_t versioned_constants_size = legacy_constants_size + sizeof(uint) + sizeof(uint);
 	
 	if( (file = open(filename, O_RDONLY)) < 0) {
 		printf("Cannot open file %s\n", filename);
@@ -872,6 +1253,17 @@ int loadIndexConstants(void *index, char *basename) {
 	errr = read(file, &wcsa->sourceTextSize, sizeof(ulong));
 	errr = read(file, &wcsa->maxNumOccs, sizeof(uint));
 	errr = read(file, &wcsa->ndocs, sizeof(uint));
+	wcsa->versioning_enabled = 0;
+	wcsa->versioning_map_entries = 0;
+	if (constants_file_size >= versioned_constants_size) {
+		errr = read(file, &wcsa->versioning_enabled, sizeof(uint));
+		errr = read(file, &wcsa->versioning_map_entries, sizeof(uint));
+	} else if (constants_file_size > legacy_constants_size) {
+		fprintf(stderr,
+		        "\n[ZDD] Warning: constants file size (%zu) is unexpected. "
+		        "Proceeding with legacy (non-versioned) metadata.\n",
+		        constants_file_size);
+	}
 
 
 	close(file);			

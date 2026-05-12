@@ -51,6 +51,8 @@ using namespace std;
 #define INT2 ('I')
 #define INTN ('N')
 #define EXTRACT ('E')
+#define VERSIONED_QUERY ('V')
+#define VERSION_FILTER ('F')
 
 #define WITHREPETITIONS //------------------------
 uint REPETITIONSCOUNT=1;
@@ -172,6 +174,8 @@ void usage(char * progname) {
 	fprintf(stderr, "\t         %c <repeats> EXTRACT/INTERSECT queries;\n", EXTRACT);
 	fprintf(stderr, "\t         %c <repeats> EXTRACT/INTERSECT queries;\n", INT2);
 	fprintf(stderr, "\t         %c <repeats> EXTRACT/INTERSECT queries;\n", INTN);
+	fprintf(stderr, "\t         %c <repeats> version-aware EXTRACT/INTERSECT queries;\n", VERSIONED_QUERY);
+	fprintf(stderr, "\t         %c <repeats> <version-id> version-filtered EXTRACT/INTERSECT queries;\n", VERSION_FILTER);
 //	fprintf(stderr, "\t         %c <repeats> COUNT queries;\n", COUNT);
 	fprintf(stderr, "\t         %c <repeats> locating queries;\n", LOCATE);
 //	fprintf(stderr, "\t         %c <radix-words> <repeats> displaying queries;\n", DISPLAY);
@@ -186,6 +190,8 @@ void usage(char * progname) {
 	fprintf(stderr,"\t%s CRindex E 1 \"nooptionsRequiredForExtract\" < pattscr.xt100k_4\n",progname);
 	fprintf(stderr,"\t%s CRindex I 1 \"int2=svs;intn=svs;fsearch=expM\" < pattscr.xt100k_4\n",progname);
 	fprintf(stderr,"\t%s CRindex N 1 \"int2=svs;intn=svs;fsearch=expM\" < pattscr.xt100k_4\n",progname);
+	fprintf(stderr,"\t%s CRindex V 1 \"int2=svs;intn=svs;fsearch=expM\" < pattscr.xt100k_4\n",progname);
+	fprintf(stderr,"\t%s CRindex F 1 3 \"int2=svs;intn=svs;fsearch=expM\" < pattscr.xt100k_4\n",progname);
 	fprintf(stderr,"\t%s CRindex T \"int2=svs;intn=svs;fsearch=expM\" \n\n",progname);
 }
 
@@ -210,10 +216,14 @@ static long Index_sizect,Index_sizeil;
 
 static char operation;
 static char *indexbasename;
+static uint query_target_version = 0;
 
 
 char *parseParams(int argc, char *argv[], int first) {
 	char *params = NULL;
+	if (first >= argc) {
+		return NULL;
+	}
 
 	int i;	
 	int nchars, len;
@@ -262,13 +272,23 @@ int main(int argc, char* argv[])
 	
 	char *params = NULL;
 
-	params = parseParams(argc, argv, 3);
-	fprintf(stderr,"\n parameters for intersections: ==>  \"%s\" <==", params); 	
-
 	// Reads params (input file, query_type
 	infile = argv[1];
 	query_type = argv[2][0];	
 	operation = query_type;		
+	if (query_type == VERSION_FILTER) {
+		if (argc < 5) {
+			fprintf(stderr, "Use: %s <index basename> <F> <repeats> <version-id> [params for search]\n", argv[0]);
+			exit(1);
+		}
+		query_target_version = (uint) atoi(argv[4]);
+		params = parseParams(argc, argv, 5);
+	} else if (query_type == TEST) {
+		params = parseParams(argc, argv, 3);
+	} else {
+		params = parseParams(argc, argv, 4);
+	}
+	fprintf(stderr,"\n parameters for intersections: ==>  \"%s\" <==", params ? params : "(none)"); 	
 	
 	#ifdef DO_LOG
 		logFile = fopen("log.log","w");
@@ -283,7 +303,7 @@ int main(int argc, char* argv[])
 	/**/	sprintf(outFilename, "times_%c_%s.txt", query_type, progname);
 	/**/	timeFile = fopen(outFilename,"a");
 	/**/	if (!timeFile) {printf("\n could not open log_times file (%s)... exitting\n",outFilename); exit(0);}
-	/**/	fprintf(timeFile,"\n Search: %s %s: %s\n",argv[0],argv[1], params);
+	/**/	fprintf(timeFile,"\n Search: %s %s: %s\n",argv[0],argv[1], params ? params : "(none)");
 	/**/
 	/**/	char outFilenameGNU[256];	
 	/**/	sprintf(outFilenameGNU,"%c.dat",query_type);
@@ -334,7 +354,7 @@ int main(int argc, char* argv[])
 	//error = setDefaultSearchOptions_il (Index, params);
 	error = setDefaultIntersectionOptions(Index, params);
 	IFERRORIL (error);
-	free(params);
+	if (params) free(params);
 	
 //	if(argc == 2) {
 //		do_test(Index);
@@ -377,6 +397,8 @@ int main(int argc, char* argv[])
 			case EXTRACT:
 			case INT2:
 			case INTN:
+			case VERSIONED_QUERY:
+			case VERSION_FILTER:
 				if (argc < 5) {
 					printf("At least %d params are needed, you have given only %d\n",5,argc);
 					printf("Use: %s <index basename> <%C> <repeats> [params for search] \n", argv[0],query_type);						
@@ -384,6 +406,9 @@ int main(int argc, char* argv[])
 					exit (1);
 				}			
 				REPETITIONS_INTERSECT= atoi(argv[3]);
+				if (query_type == VERSION_FILTER) {
+					fprintf(stderr,"\n [ZDD] filtering by target version(master)=%u\n", query_target_version);
+				}
 				do_extract_intersect(Index); 
 				break;
 
@@ -750,6 +775,8 @@ do_extract_intersect (void *Index)
 	int error = 0;
 	uint numocc, *occ;
 	ulong tot_numocc=0;
+	uint is_versioned = 0;
+	uint map_entries = 0;
 	
 	double atime, tot_time = 0;
 	
@@ -763,6 +790,7 @@ do_extract_intersect (void *Index)
 	loadPatterns(&patterns, &lens, &numpatt, &nwordsperpattern);
 	uint **ids; uint *nids; //patterns converted into ids;
 	loadIds(Index, &ids,&nids, patterns, lens, &numpatt);
+	index_is_versioned(Index, &is_versioned, &map_entries);
 	
 	uint minnw = nwordsperpattern;
 	uint maxnw = nwordsperpattern;
@@ -776,6 +804,14 @@ do_extract_intersect (void *Index)
 	fflush(stdout);fflush(stderr);
 	fprintf (stderr,"\nStarting Extract/Intersection over %u patterns:",numpatt);
 	fprintf (stderr,"\n\t patterns contain [from %u to %u] words:",minnw,maxnw);
+	if (operation == VERSIONED_QUERY || operation == VERSION_FILTER) {
+		fprintf(stderr,
+		        "\n\t [ZDD] version-aware query mode. metadata(enabled=%u,mapEntries=%u)",
+		        is_versioned, map_entries);
+		if (!is_versioned) {
+			fprintf(stderr, "\n\t [ZDD] metadata unavailable -> fallback to classic query semantics.");
+		}
+	}
 	#ifdef WITHREPETITIONS
 	fprintf(stderr," ** extract/intersect: repetitions = %d\n",REPETITIONS_INTERSECT);
 	#endif	
@@ -816,7 +852,13 @@ getTimeNano(&t1);
 		 }
 		 */
 		  /* Extract /intersect */
-		  error = index_listDocuments(Index, ids[i], nids[i], &occ, &numocc);
+		  if (operation == VERSION_FILTER) {
+			  error = index_listDocuments_by_version(Index, ids[i], nids[i], query_target_version, &occ, &numocc, &is_versioned);
+		  } else if (operation == VERSIONED_QUERY) {
+			  error = index_listDocuments_versioned(Index, ids[i], nids[i], &occ, &numocc, &is_versioned);
+		  } else {
+			  error = index_listDocuments(Index, ids[i], nids[i], &occ, &numocc);
+		  }
 		  //printf("\n iter %4lu of %4lu , occs=%6lu,  <<pattern = %s>>",i,numpatt,numocc,pattern);
 	  		  
 		  tot_numocc += numocc;
@@ -866,7 +908,13 @@ t2_t1/= (double) REPETITIONS_INTERSECT;
 	fprintf (stderr, "(Load_time+Extract:Intersect_time)/Num_occs = %.8f %s/occs\n\n", ((tot_time+Load_time) * MSEC_TIME_DIVIDER) / tot_numocc , MSEC_TIME_UNIT);
 
 	char opname[25];
-	if ((minnw==maxnw) && (minnw ==1)) {
+	if (operation == VERSIONED_QUERY) {
+		sprintf(opname,"%s","Versioned");
+	}
+	else if (operation == VERSION_FILTER) {
+		sprintf(opname,"%s","VersionFilter");
+	}
+	else if ((minnw==maxnw) && (minnw ==1)) {
 		operation = 'E'; sprintf(opname,"%s","Extract");
 	}
 	else if ((minnw==maxnw) && (minnw ==2)) {
