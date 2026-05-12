@@ -20,9 +20,10 @@
 
   // Data types
 
-#ifndef byte
-	#define byte unsigned char
-#endif 
+#ifndef BYTE_TYPEDEF_DEFINED
+#define BYTE_TYPEDEF_DEFINED
+typedef unsigned char byte;
+#endif
 
 //typedef unsigned char byte;
 // typedef unsigned int uint;
@@ -33,6 +34,11 @@
 
 #define max(x,y) ((x)>(y)?(x):(y))
 #define min(x,y) ((x)<(y)?(x):(y))
+
+#ifdef __cplusplus
+#undef min
+#undef max
+#endif
 
   // Bitstream management
 

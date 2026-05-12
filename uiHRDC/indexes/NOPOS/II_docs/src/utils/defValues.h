@@ -20,7 +20,10 @@
 #define SOURCE_ALPHABET_SIZE 4   //ACTG
 #define MAX_QGRAM_LEN 64
 
-#define byte unsigned char
+#ifndef BYTE_TYPEDEF_DEFINED
+#define BYTE_TYPEDEF_DEFINED
+typedef unsigned char byte;
+#endif
 
 // Extensions of created  files
 #define SOURCETEXT "src"
