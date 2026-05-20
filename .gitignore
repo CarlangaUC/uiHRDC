@@ -1,2 +1,15 @@
 # Resúmenes locales de sesión (mantener en disco, no versionar)
 CAMBIOS_RESTAURACION_DATASETS_Y_PRUEBAS_2026-05-12.md
+
+# Artefactos de testeo/resultados (datasets, indices y logs generados)
+uiHRDC/data/texts/index_*.const
+uiHRDC/data/texts/index_*.voc
+uiHRDC/data/texts/index_*.il.*
+uiHRDC/data/texts/listas_wikipedia_zdd*
+uiHRDC/data/texts/page_mapping_*.bin
+uiHRDC/data/texts/*.DOCBOUNDARIES.ul
+uiHRDC/data/texts/*.log
+uiHRDC/data/texts/wiki_*.txt
+uiHRDC/data/texts/torsen*.txt
+uiHRDC/indexes/NOPOS/II_docs/postinglists.posts.*
+uiHRDC/indexes/NOPOS/II_docs/times_*.txt
